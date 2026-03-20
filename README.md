@@ -79,7 +79,7 @@ Each container goes through these states:
 
 If a container fails during memory allocation, the scheduler reclaims that memory slot so other containers can use it.
 
-## ⚡ Complete Rebuild 
+## Complete Rebuild 
 
 ```bash
 # 1. Stop everything
@@ -237,7 +237,7 @@ This simulates containers to verify the scheduler logic works correctly.
 ## Scheduler state machine diagram
 ```mermaid
 graph TD
-   Start["Scheduler Started<br/>simulation_duration_hours<br/>set"] -->|"Main Loop"| Step["step called<br/>Every 0.01 seconds"]
+   Start["Scheduler Started<br/>simulation_duration_hours<br/>set"] -->|"Main Loop"| Step["step called<br/>Every<br/>step_interval_seconds<br/>seconds"]
 
    Step -->|"Check end time"| EndCheck{"Simulation<br/>complete?"}
 
@@ -247,7 +247,7 @@ graph TD
    LaunchCheck -->|"No"| Step
    LaunchCheck -->|"Yes"| Launch["_try_launch_container"]
 
-   Launch -->|"Can launch?"| CanLaunch{"Active under max_concurrent<br/>AND memory available?"}
+   Launch -->|"Can launch?"| CanLaunch{"Active under<br/>max_concurrent<br/>AND memory available?"}
 
    CanLaunch -->|"No"| Step
    CanLaunch -->|"Yes"| Register["Register container<br/>Create ContainerRunConfig"]
