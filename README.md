@@ -247,7 +247,7 @@ graph TD
    LaunchCheck -->|"No"| Step
    LaunchCheck -->|"Yes"| Launch["_try_launch_container"]
 
-   Launch -->|"Can launch?"| CanLaunch{"Active under max_concurrent<br/>AND memory available?"}
+   Launch -->|"Can launch?"| CanLaunch{"Active under<br/>max_concurrent<br/>AND memory available?"}
 
    CanLaunch -->|"No"| Step
    CanLaunch -->|"Yes"| Register["Register container<br/>Create ContainerRunConfig"]
