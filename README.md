@@ -79,7 +79,7 @@ Each container goes through these states:
 
 If a container fails during memory allocation, the scheduler reclaims that memory slot so other containers can use it.
 
-## ⚡ Complete Rebuild 
+## Complete Rebuild 
 
 ```bash
 # 1. Stop everything
