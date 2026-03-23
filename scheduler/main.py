@@ -257,7 +257,7 @@ class Scheduler:
 
                 # Check if should trigger scheduler reset
                 if self.state_tracker.should_trigger_scheduler_reset():
-                    logger.critical(f"⚠️ SCHEDULER RESET TRIGGERED: 3 consecutive OOM failures detected")
+                    logger.critical(f"SCHEDULER RESET TRIGGERED: 3 consecutive OOM failures detected")
                     self.state_tracker.record_oom_event()
                     return False
 
