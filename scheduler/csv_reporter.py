@@ -688,7 +688,7 @@ class CSVReporter:
             writer.writerow([])
             writer.writerow([f'RECOMMENDATION: Dynamic Reset (cycle={self._get_reset_interval()}) — computed at startup'])
             writer.writerow(['Rationale: Maintains constant-parallelism cycling, adapts to any base_memory, prevents starvation'])
-            writer.writerow([f'Formula: memory = base × (multiplier ^ ((n-1) % {self._get_reset_interval()}))')
+            writer.writerow([f'Formula: memory = base × (multiplier ^ ((n-1) % {self._get_reset_interval()}))'])
             writer.writerow([])
 
             # Memory growth with different approaches
