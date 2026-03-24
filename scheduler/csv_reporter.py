@@ -957,6 +957,7 @@ class CSVReporter:
             writer.writerow(['containers_data.csv', 'Container execution data', 'Execution metrics'])
             writer.writerow(['memory_timeline.csv', 'Memory usage over time', 'Resource tracking'])
             writer.writerow(['execution_schedule.csv', 'Complete container scheduling with concurrency', 'Comprehensive scheduling detail'])
+            writer.writerow(['chronological_timeline.csv', 'Event-by-event timeline of all scheduling events', 'Narrative schedule with queue events'])
             writer.writerow(['queue_analysis.csv', 'Ready queue events and statistics', 'Queue fairness tracking'])
 
         return filepath
@@ -1150,6 +1151,192 @@ class CSVReporter:
                     # Stop if we've gone far enough into simulation
                     if container_id > 50:  # Just show first 50 for readability
                         break
+
+        return filepath
+
+    def generate_chronological_timeline_csv(self):
+        """Generate chronological event timeline showing all scheduling events with state transitions"""
+        filepath = os.path.join(self.report_subdir, "chronological_timeline.csv")
+
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+
+            # Header
+            writer.writerow(['CHRONOLOGICAL EVENT TIMELINE'])
+            writer.writerow(['Complete scheduling events with container state transitions and memory status'])
+            writer.writerow(['Generated:', datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow([])
+
+            # Configuration
+            writer.writerow(['CONFIGURATION'])
+            writer.writerow(['Base Memory:', f'{self.config.base_memory_mb} MB'])
+            writer.writerow(['Memory Multiplier:', f'{self.config.memory_multiplier}x'])
+            writer.writerow(['Total GPU Memory:', f'{self.config.total_gpu_memory_mb} MB'])
+            writer.writerow(['Container Duration:', f'{self.config.container_duration_seconds}s'])
+            writer.writerow(['Max Concurrent:', f'{self.config.max_concurrent_containers}'])
+            writer.writerow(['Reset Interval (cycle):', f'{self._get_reset_interval()}'])
+            writer.writerow([])
+
+            if not self.containers:
+                writer.writerow(['STATUS: No container data collected yet'])
+                return filepath
+
+            # Build all events chronologically
+            all_events = []
+
+            # Add container lifecycle events
+            for c in self.containers.values():
+                all_events.append({
+                    'time': c.launch_time,
+                    'type': 'LAUNCH',
+                    'container_id': c.container_id,
+                    'memory': c.memory_mb,
+                    'completion_time': c.completion_time,
+                    'states': c.state_transitions,
+                    'success': c.success
+                })
+                if c.completion_time:
+                    all_events.append({
+                        'time': c.completion_time,
+                        'type': 'COMPLETION',
+                        'container_id': c.container_id,
+                        'memory': c.memory_mb,
+                        'completion_time': c.completion_time,
+                        'states': c.state_transitions,
+                        'success': c.success
+                    })
+
+            # Add queue events
+            for qe in self.queue_events:
+                all_events.append({
+                    'time': qe['timestamp'],
+                    'type': 'QUEUED',
+                    'container_id': qe['container_id'],
+                    'memory': qe['memory_mb'],
+                    'reason': qe['reason'],
+                    'cycle_position': qe['cycle_position']
+                })
+
+            # Sort by time, with LAUNCH before COMPLETION before QUEUED at same time
+            event_order = {'LAUNCH': 0, 'QUEUED': 1, 'COMPLETION': 2}
+            all_events.sort(key=lambda e: (e['time'], event_order.get(e['type'], 3)))
+
+            # Timeline header
+            writer.writerow([
+                'Time (s)',
+                'Event',
+                'Container',
+                'Action',
+                'Active Containers',
+                'Memory Used (MB)',
+                'Memory %',
+                'Free Memory (MB)',
+                'Notes'
+            ])
+
+            # Track active containers at each point in time
+            active_containers = {}
+
+            for event in all_events:
+                event_time = event['time']
+                event_type = event['type']
+                container_id = event['container_id']
+                memory = event.get('memory', 0)
+
+                # Update active containers based on event type
+                if event_type == 'LAUNCH':
+                    active_containers[container_id] = {
+                        'memory': memory,
+                        'launch_time': event_time,
+                        'type': ((container_id - 1) % self._get_reset_interval()) + 1,
+                        'cycle': self._get_reset_interval()
+                    }
+                elif event_type == 'COMPLETION':
+                    active_containers.pop(container_id, None)
+
+                # Calculate memory stats
+                total_memory = sum(c['memory'] for c in active_containers.values())
+                remaining = self.config.total_gpu_memory_mb - total_memory
+                memory_pct = (total_memory / self.config.total_gpu_memory_mb) * 100
+                active_ids = sorted(active_containers.keys())
+
+                # Build event description
+                if event_type == 'LAUNCH':
+                    container_type = active_containers[container_id]['type']
+                    cycle = active_containers[container_id]['cycle']
+                    action = f"Launch C{container_id} (type {container_type}/{cycle}, {memory:.0f} MB)"
+                    notes = f"C{container_id} starts" if len(active_ids) == 1 else f"C{container_id} starts, {len(active_ids)} now active"
+
+                elif event_type == 'COMPLETION':
+                    freed = memory
+                    action = f"C{container_id} completes (free {freed:.0f} MB)"
+                    # Check if anything was queued
+                    queued_for_this = [e for e in self.queue_events if e['container_id'] == container_id]
+                    if queued_for_this:
+                        notes = f"Free C{container_id}, was queued for {len(queued_for_this)} event(s)"
+                    else:
+                        notes = f"Free C{container_id}"
+                    # Check if new container can launch
+                    if active_containers:
+                        notes += f", {len(active_ids)} still active"
+
+                elif event_type == 'QUEUED':
+                    reason = event.get('reason', 'UNKNOWN')
+                    action = f"C{container_id} queued ({reason}, needs {memory:.0f} MB)"
+                    notes = f"C{container_id} blocked - {reason}"
+                    if reason == 'WAITING_MEMORY':
+                        notes += f" (free {remaining:.0f} < needed {memory:.0f})"
+                    elif reason == 'WAITING_SLOT':
+                        notes += f" ({len(active_ids)}/{self.config.max_concurrent_containers} slots full)"
+
+                active_ids_str = ', '.join([f'C{cid}' for cid in active_ids]) if active_ids else '(empty)'
+
+                writer.writerow([
+                    f"{event_time:.1f}",
+                    event_type,
+                    f"C{container_id}",
+                    action,
+                    active_ids_str,
+                    f"{total_memory:.1f}",
+                    f"{memory_pct:.2f}%",
+                    f"{remaining:.1f}",
+                    notes
+                ])
+
+            # Summary section
+            writer.writerow([])
+            writer.writerow(['TIMELINE SUMMARY'])
+            writer.writerow(['Metric', 'Value', 'Unit'])
+
+            total_events = len(all_events)
+            launch_events = sum(1 for e in all_events if e['type'] == 'LAUNCH')
+            completion_events = sum(1 for e in all_events if e['type'] == 'COMPLETION')
+            queue_events_count = sum(1 for e in all_events if e['type'] == 'QUEUED')
+
+            writer.writerow(['Total Events', total_events, 'count'])
+            writer.writerow(['Container Launches', launch_events, 'count'])
+            writer.writerow(['Container Completions', completion_events, 'count'])
+            writer.writerow(['Queue Events', queue_events_count, 'count'])
+
+            if all_events:
+                start_time = all_events[0]['time']
+                end_time = all_events[-1]['time']
+                total_time = end_time - start_time
+
+                writer.writerow(['Timeline Start', f"{start_time:.1f}", 'seconds'])
+                writer.writerow(['Timeline End', f"{end_time:.1f}", 'seconds'])
+                writer.writerow(['Total Duration', f"{total_time:.1f}", 'seconds'])
+                writer.writerow(['Average Event Interval', f"{total_time/total_events if total_events > 0 else 0:.2f}", 'seconds'])
+
+            # Queue analysis
+            if self.queue_events:
+                writer.writerow([])
+                writer.writerow(['QUEUE ANALYSIS (from timeline)'])
+                waiting_memory = sum(1 for e in self.queue_events if e['reason'] == 'WAITING_MEMORY')
+                waiting_slot = sum(1 for e in self.queue_events if e['reason'] == 'WAITING_SLOT')
+
+                writer.writerow(['WAITING_MEMORY Events', waiting_memory, 'count'])
+                writer.writerow(['WAITING_SLOT Events', waiting_slot, 'count'])
 
         return filepath
 
@@ -1482,6 +1669,7 @@ class CSVReporter:
             'first_hour_timeline': self.generate_first_hour_timeline_csv(),
             'container_launch_schedule': self.generate_container_launch_schedule_csv(),
             'execution_schedule': self.generate_execution_schedule_csv(),
+            'chronological_timeline': self.generate_chronological_timeline_csv(),
             'queue_analysis': self.generate_queue_analysis_csv(),
             'summary_report': self.generate_summary_report()
         }
