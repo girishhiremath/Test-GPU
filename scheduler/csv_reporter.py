@@ -1151,6 +1151,89 @@ class CSVReporter:
 
         return filepath
 
+    def generate_queue_analysis_csv(self):
+        """Generate DYNAMIC queue_analysis.csv with ready queue statistics"""
+        filepath = os.path.join(self.report_subdir, "queue_analysis.csv")
+
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+
+            writer.writerow(['Ready Queue Analysis - DYNAMIC REPORT'])
+            writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+            writer.writerow([])
+
+            # Summary statistics from actual collected data
+            total_queue_events = len(self.queue_events)
+            writer.writerow(['QUEUE SUMMARY (ACTUAL DATA)'])
+            writer.writerow(['Total Queue Events:', total_queue_events])
+
+            if total_queue_events == 0:
+                writer.writerow(['Status:', 'No queuing - all containers launched immediately'])
+                return filepath
+
+            # Categorize by reason
+            waiting_memory = [e for e in self.queue_events if e['reason'] == 'WAITING_MEMORY']
+            waiting_slot = [e for e in self.queue_events if e['reason'] == 'WAITING_SLOT']
+
+            writer.writerow(['WAITING_MEMORY Events:', len(waiting_memory)])
+            writer.writerow(['WAITING_SLOT Events:', len(waiting_slot)])
+            writer.writerow([])
+
+            # Container-level analysis
+            unique_containers = len(set(e['container_id'] for e in self.queue_events))
+            writer.writerow(['Unique Containers Queued:', unique_containers])
+
+            # Memory analysis from actual queue data
+            total_queued_memory = sum(e['memory_mb'] for e in self.queue_events)
+            avg_queued_memory = total_queued_memory / total_queue_events if total_queue_events > 0 else 0
+            max_queued_memory = max((e['memory_mb'] for e in self.queue_events), default=0)
+            min_queued_memory = min((e['memory_mb'] for e in self.queue_events), default=0)
+
+            writer.writerow([])
+            writer.writerow(['MEMORY PROFILE (ACTUAL QUEUE DATA)'])
+            writer.writerow(['Total Memory Queued (MB):', f'{total_queued_memory:.2f}'])
+            writer.writerow(['Average Memory per Queue Event (MB):', f'{avg_queued_memory:.2f}'])
+            writer.writerow(['Maximum Queued Memory (MB):', f'{max_queued_memory:.2f}'])
+            writer.writerow(['Minimum Queued Memory (MB):', f'{min_queued_memory:.2f}'])
+
+            writer.writerow([])
+            writer.writerow(['QUEUE EVENT TIMELINE'])
+            writer.writerow(['Sequence', 'Container ID', 'Type', 'Memory (MB)', 'Reason', 'Timestamp'])
+
+            for idx, event in enumerate(sorted(self.queue_events, key=lambda e: e['timestamp']), 1):
+                ts = datetime.fromtimestamp(event['timestamp']).strftime("%H:%M:%S")
+                container_type = f"type {(event['cycle_position'] % self.config.max_concurrent_containers) + 1}/{ self.config.max_concurrent_containers}"
+                writer.writerow([
+                    idx,
+                    event['container_id'],
+                    container_type,
+                    f"{event['memory_mb']:.2f}",
+                    event['reason'],
+                    ts
+                ])
+
+            writer.writerow([])
+            writer.writerow(['QUEUE REASON BREAKDOWN'])
+            if waiting_memory:
+                writer.writerow(['WAITING_MEMORY Events:'])
+                for event in waiting_memory:
+                    ts = datetime.fromtimestamp(event['timestamp']).strftime("%H:%M:%S")
+                    writer.writerow(['  Container', event['container_id'], 'at', ts, '- Memory needed:', f"{event['memory_mb']:.2f} MB"])
+
+            if waiting_slot:
+                writer.writerow([])
+                writer.writerow(['WAITING_SLOT Events:'])
+                for event in waiting_slot:
+                    ts = datetime.fromtimestamp(event['timestamp']).strftime("%H:%M:%S")
+                    writer.writerow(['  Container', event['container_id'], 'at', ts, '- All slots occupied'])
+
+            writer.writerow([])
+            writer.writerow(['DYNAMIC INSIGHTS'])
+            writer.writerow(['Primary Bottleneck:', 'MEMORY' if len(waiting_memory) > len(waiting_slot) else 'SLOTS'])
+            writer.writerow(['Queue Fairness:', 'FIFO (First-In-First-Out) - all containers eventually launch'])
+            writer.writerow(['Container Distribution:', f'{unique_containers} unique containers queued during execution'])
+
+        return filepath
 
     def generate_all_reports(self):
         """Generate all CSV reports"""
@@ -1164,6 +1247,7 @@ class CSVReporter:
             'memory_timeline': self.generate_memory_timeline_csv(),
             'first_hour_timeline': self.generate_first_hour_timeline_csv(),
             'container_launch_schedule': self.generate_container_launch_schedule_csv(),
+            'queue_analysis': self.generate_queue_analysis_csv(),
             'summary_report': self.generate_summary_report()
         }
 
