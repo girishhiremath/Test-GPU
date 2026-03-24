@@ -5,6 +5,7 @@ Generates detailed CSV reports for mathematical modeling and scheduling analysis
 import csv
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -90,6 +91,54 @@ class CSVReporter:
         self.containers: Dict[int, ContainerMetrics] = {}
         self.memory_timeline: List[Dict] = []
         self.parallelism_events: List[Dict] = []
+        self.dynamic_reset = None  # Set by scheduler after init
+        self.queue_events: List[Dict] = []  # Track ready queue events
+
+    def set_dynamic_reset_info(self, max_container_index, max_simultaneous, cycle_memory):
+        """Receive computed dynamic reset values from scheduler.
+        All report generators use these instead of hardcoded values."""
+        self.dynamic_reset = {
+            'max_container_index': max_container_index,
+            'max_simultaneous': max_simultaneous,
+            'cycle_memory': cycle_memory,
+        }
+
+    def _get_reset_interval(self):
+        """Get the dynamic reset interval. Falls back to calculation if not set."""
+        if self.dynamic_reset:
+            return self.dynamic_reset['max_simultaneous']
+        # Fallback: calculate from config
+        import math
+        base = self.config.base_memory_mb
+        mult = self.config.memory_multiplier
+        gpu = self.config.total_gpu_memory_mb
+        if base <= 0 or base > gpu:
+            return 1
+        max_n = int(math.floor(1 + math.log(gpu / base) / math.log(mult)))
+        while max_n > 0 and base * (mult ** (max_n - 1)) > gpu:
+            max_n -= 1
+        total = 0
+        k = 0
+        for i in range(min(max_n, self.config.max_concurrent_containers)):
+            mem = base * (mult ** i)
+            if total + mem <= gpu:
+                total += mem
+                k = i + 1
+            else:
+                break
+        return max(k, 1)
+
+    def _get_cycle_memory(self):
+        """Get the cycle memory from dynamic reset info."""
+        if self.dynamic_reset:
+            return self.dynamic_reset['cycle_memory']
+        # Fallback
+        reset_n = self._get_reset_interval()
+        return sum(self.config.base_memory_mb * (self.config.memory_multiplier ** i) for i in range(reset_n))
+
+    def _get_gpu_utilization(self):
+        """Get GPU utilization percentage for the cycle."""
+        return (self._get_cycle_memory() / self.config.total_gpu_memory_mb * 100)
 
     def register_container(self, container_id: int, memory_mb: float, duration_seconds: int):
         """Register a container for tracking"""
@@ -121,6 +170,16 @@ class CSVReporter:
             'active_containers': active_containers,
             'total_memory_used_mb': total_memory_mb,
             'remaining_memory_mb': remaining_memory_mb
+        })
+
+    def record_queue_event(self, container_id: int, memory_mb: float, reason: str, cycle_position: int):
+        """Record when a container is queued (WAITING_SLOT or WAITING_MEMORY)"""
+        self.queue_events.append({
+            'timestamp': time.time(),
+            'container_id': container_id,
+            'memory_mb': memory_mb,
+            'reason': reason,
+            'cycle_position': cycle_position
         })
 
     def record_parallelism_event(self, timestamp: float, active_containers: int, event: str):
@@ -198,14 +257,16 @@ class CSVReporter:
             writer.writerow(['Failed Containers', failed_containers, 'count'])
             writer.writerow(['Success Rate', f'{success_rate:.1f}', '%'])
             writer.writerow([])
-            writer.writerow(['MEMORY UTILIZATION (WITH RESET EVERY 3)'])
-            writer.writerow(['Peak Cycle Utilization', '99.96%', 'C1+C2+C3 = 4094.5 / 4096 MB'])
-            writer.writerow(['Cycle Memory (C1)', f'{self.config.base_memory_mb:.1f}', 'MB (position 1)'])
-            cycle_2_mem = self.config.base_memory_mb * self.config.memory_multiplier
-            cycle_3_mem = self.config.base_memory_mb * (self.config.memory_multiplier ** 2)
-            writer.writerow(['Cycle Memory (C2)', f'{cycle_2_mem:.1f}', 'MB (position 2)'])
-            writer.writerow(['Cycle Memory (C3)', f'{cycle_3_mem:.1f}', 'MB (position 3)'])
-            writer.writerow(['Cycle Total', f'{self.config.base_memory_mb + cycle_2_mem + cycle_3_mem:.1f}', 'MB (total per cycle)'])
+            reset_n = self._get_reset_interval()
+            cycle_mem = self._get_cycle_memory()
+            gpu_util = self._get_gpu_utilization()
+
+            writer.writerow([f'MEMORY UTILIZATION (DYNAMIC RESET, cycle={reset_n})'])
+            writer.writerow(['Peak Cycle Utilization', f'{gpu_util:.2f}%', f'Cycle = {cycle_mem:.1f} / {self.config.total_gpu_memory_mb} MB'])
+            for i in range(reset_n):
+                mem = self.config.base_memory_mb * (self.config.memory_multiplier ** i)
+                writer.writerow([f'Cycle Position {i+1}', f'{mem:.1f}', 'MB'])
+            writer.writerow(['Cycle Total', f'{cycle_mem:.1f}', 'MB'])
 
         return filepath
 
@@ -395,14 +456,14 @@ class CSVReporter:
             writer = csv.writer(f)
 
             writer.writerow(['PART 2 - SCHEDULING ALGORITHM DESIGN'])
-            writer.writerow(['Non-blocking Event-Driven Scheduler with Memory Reset Every 3'])
+            writer.writerow([f'Non-blocking Event-Driven Scheduler with Dynamic Memory Reset (cycle={self._get_reset_interval()})'])
             writer.writerow(['Configuration:'])
             writer.writerow([f'  Base Memory: {self.config.base_memory_mb} MB'])
             writer.writerow([f'  Multiplier: {self.config.memory_multiplier}'])
             writer.writerow([f'  Total GPU Memory: {self.config.total_gpu_memory_mb} MB'])
             writer.writerow([f'  Container Duration: {self.config.container_duration_seconds} seconds'])
             writer.writerow([f'  Max Concurrent: {self.config.max_concurrent_containers}'])
-            writer.writerow([f'  Memory Reset Interval: every 3 containers'])
+            writer.writerow([f'  Memory Reset: Dynamic (cycle={self._get_reset_interval()}, computed at startup)'])
             writer.writerow([])
 
             writer.writerow(['SCHEDULER STATE TIMELINE - First 3600 seconds of execution'])
@@ -426,7 +487,7 @@ class CSVReporter:
             active_containers = {}  # {container_id: {'start_time': t, 'memory': m}}
             current_time_sec = 0
             container_num = 1
-            reset_interval = 3
+            reset_interval = self._get_reset_interval()
             step_size = 5  # seconds
 
             # Simulate with 5-second sampling intervals
@@ -466,7 +527,7 @@ class CSVReporter:
                 # Check if can launch new container (only at specific launch times: 0s, 5s, 10s, ...)
                 launch_interval = 5  # Try to launch every 5 seconds
                 if container_num <= 100 and current_time_sec % launch_interval == 0:
-                    # Apply reset formula: effective_position = ((n-1) % 3) + 1
+                    # Apply reset formula: effective_position = ((n-1) % reset_interval) + 1
                     effective_pos = ((container_num - 1) % reset_interval) + 1
                     memory = self.config.base_memory_mb * (self.config.memory_multiplier ** (effective_pos - 1))
 
@@ -616,7 +677,7 @@ class CSVReporter:
 
             approaches = [
                 ['Sliding Window', 'Exponential growth continues, parallelism drops', '9', 'Drops 3→0', 'Yes', '~4', 'NOT RECOMMENDED ✗'],
-                ['Reset Every 3', 'Reset after C3 back to C1 size (ACTUAL)', '432+', 'Constant 3', 'No', '432', 'RECOMMENDED ✓'],
+                [f'Dynamic Reset (cycle={self._get_reset_interval()})', 'Reset when next > GPU (ACTUAL)', '∞', f'{self._get_reset_interval()}', 'No', f'{int(86400/self.config.container_duration_seconds)*self._get_reset_interval()}', 'RECOMMENDED ✓'],
                 ['Reset Every 4', 'Reset after C4 back to C1 size', '432+', 'Varies 1-3', 'No', '288', 'Acceptable'],
                 ['Capped at 2048', 'Cap individual container max at 2048 MB', '288+', 'Drops to 1-2', 'No', '288', 'Not optimal']
             ]
@@ -625,24 +686,25 @@ class CSVReporter:
                 writer.writerow(approach)
 
             writer.writerow([])
-            writer.writerow(['RECOMMENDATION: Reset Every 3 Containers (ACTUAL IMPLEMENTATION)'])
-            writer.writerow(['Rationale: Maintains constant 3-way parallelism, achieves 432 containers/24h, prevents starvation'])
-            writer.writerow(['Formula: memory = base × (multiplier ^ ((n-1) % 3))'])
+            writer.writerow([f'RECOMMENDATION: Dynamic Reset (cycle={self._get_reset_interval()}) — computed at startup'])
+            writer.writerow(['Rationale: Maintains constant-parallelism cycling, adapts to any base_memory, prevents starvation'])
+            writer.writerow([f'Formula: memory = base × (multiplier ^ ((n-1) % {self._get_reset_interval()}))')
             writer.writerow([])
 
             # Memory growth with different approaches
-            writer.writerow(['Container Number', 'Sliding Window (MB)', 'Reset Every 3 (MB)', 'Reset Every 4 (MB)', 'Capped at 2GB (MB)'])
+            writer.writerow(['Container Number', 'No Reset (MB)', f'Dynamic (cycle={self._get_reset_interval()}) (MB)', 'Reset Every 4 (MB)', 'Capped at 2GB (MB)'])
 
+            reset_n = self._get_reset_interval()
             for n in range(1, self.config.num_containers_to_analyze + 1):
                 sliding = self.config.base_memory_mb * (self.config.memory_multiplier ** (n - 1))
-                reset_3 = self.config.base_memory_mb * (self.config.memory_multiplier ** ((n - 1) % 3))
+                reset_dynamic = self.config.base_memory_mb * (self.config.memory_multiplier ** ((n - 1) % reset_n))
                 reset_4 = self.config.base_memory_mb * (self.config.memory_multiplier ** ((n - 1) % 4))
                 capped = min(sliding, 2048)
 
                 writer.writerow([
                     n,
                     f"{sliding:.0f}",
-                    f"{reset_3:.0f}",
+                    f"{reset_dynamic:.0f}",
                     f"{reset_4:.0f}",
                     f"{capped:.0f}"
                 ])
@@ -657,13 +719,13 @@ class CSVReporter:
             writer = csv.writer(f)
 
             writer.writerow(['MEMORY USAGE TIMELINE'])
-            writer.writerow(['Generated from container execution schedule with reset-every-3 memory model'])
+            writer.writerow([f'Generated from container execution schedule with dynamic memory model (cycle={self._get_reset_interval()})'])
             writer.writerow(['Configuration:'])
             writer.writerow([f'  Total GPU Memory: {self.config.total_gpu_memory_mb} MB'])
             writer.writerow([f'  Base Memory: {self.config.base_memory_mb} MB'])
             writer.writerow([f'  Memory Multiplier: {self.config.memory_multiplier}'])
             writer.writerow([f'  Container Duration: {self.config.container_duration_seconds} seconds'])
-            writer.writerow([f'  Reset Interval: 3 containers'])
+            writer.writerow([f'  Reset Interval: {self._get_reset_interval()} containers (dynamic)'])
             writer.writerow([])
 
             writer.writerow([
@@ -680,7 +742,7 @@ class CSVReporter:
 
             # Generate timeline from computed container schedule
             total_gpu = self.config.total_gpu_memory_mb
-            reset_interval = 3
+            reset_interval = self._get_reset_interval()
             launch_interval_seconds = 5  # containers launched every 5 seconds
             container_duration_seconds = self.config.container_duration_seconds
 
@@ -819,20 +881,21 @@ class CSVReporter:
 
             # Q3: Throughput analysis
             writer.writerow([])
-            writer.writerow(['Q3: Total throughput analysis (MEASURED WITH RESET EVERY 3)'])
+            reset_n = self._get_reset_interval()
+            cycle_time = self.config.container_duration_seconds
+            total_seconds = self.config.simulation_hours * 3600
+            cycles_total = int(total_seconds / cycle_time)
+            containers_total = cycles_total * reset_n
+
+            writer.writerow([f'Q3: Total throughput analysis (DYNAMIC RESET, cycle={reset_n})'])
             writer.writerow(['Metric', 'Value', 'Unit'])
-            # total_slots = (self.config.simulation_hours * 60 * 60) // self.config.container_duration_seconds
-            # cycles_total = total_slots // self.config.max_concurrent_containers
-            # containers_total = cycles_total * self.config.max_concurrent_containers
-            cycles_total = int((self.config.simulation_hours * 3600) / (self.config.container_duration_seconds + 5))  # Approximate cycle time
-            containers_total = cycles_total * self.config.max_concurrent_containers
             writer.writerow(['Simulation Duration', f'{self.config.simulation_hours}', 'hours'])
-            writer.writerow(['Total Time Slots', f'{cycles_total}', 'slots'])
-            writer.writerow(['Slot Duration', f'{self.config.container_duration_seconds}', 'seconds'])
-            writer.writerow(['Containers per Cycle', f'{self.config.max_concurrent_containers}', 'containers'])
-            # writer.writerow(['Expected Total Cycles', f'{cycles_total}', 'cycles'])
-            writer.writerow(['Expected Total Containers', f'~{containers_total}', 'containers (measured)'])
-            writer.writerow(['Peak GPU Utilization', '99.96%', '4094.5 / 4096 MB (C1+C2+C3)'])
+            writer.writerow(['Cycle Duration', f'{cycle_time}', f'seconds ({reset_n} containers simultaneously)'])
+            writer.writerow(['Containers per Cycle', f'{reset_n}', 'containers'])
+            writer.writerow(['Total Cycles', f'{cycles_total}', 'cycles'])
+            writer.writerow(['Expected Total', f'~{containers_total}', 'containers'])
+            writer.writerow(['Cycle Memory', f'{self._get_cycle_memory():.1f}', 'MB'])
+            writer.writerow(['GPU Utilization', f'{self._get_gpu_utilization():.2f}', '%'])
             writer.writerow([])
 
             # Part 2: Scheduling Algorithm
@@ -860,19 +923,20 @@ class CSVReporter:
 
             # Part 3: Starvation Prevention
             writer.writerow(['PART 3 - STARVATION PREVENTION ANALYSIS'])
+            reset_n = self._get_reset_interval()
             writer.writerow(['Policy Approach', 'Description', 'Max Containers/24h', 'Recommendation'])
             writer.writerow(['Sliding Window', 'Exponential continues', '4', 'Causes starvation ✗'])
-            writer.writerow(['Reset Every 3', 'Reset after C3 (ACTUAL)', '432', 'Recommended ✓'])
+            writer.writerow([f'Dynamic Reset (cycle={reset_n})', 'Computed at startup (ACTUAL)', f'{int(86400/self.config.container_duration_seconds)*reset_n}', 'Recommended ✓'])
             writer.writerow(['Reset Every 4', 'Reset after C4', '288', 'Acceptable'])
             writer.writerow(['Capped at 2048', 'Cap individual container', '288', 'Not optimal'])
             writer.writerow([])
-            writer.writerow(['Recommended Policy: Reset Every 3 Containers (PRODUCTION)'])
+            writer.writerow([f'Recommended Policy: Dynamic Reset (cycle={reset_n})'])
             writer.writerow(['Rationale', 'Detail'])
-            writer.writerow(['Measured Throughput', '165 containers/hour, 432 expected for 24h'])
-            writer.writerow(['Parallelism', 'Maintains constant 3-way parallelism'])
-            writer.writerow(['GPU Utilization', 'Peak 99.96% (4094.5 / 4096 MB)'])
+            writer.writerow(['Measured Throughput', f'{int(86400/self.config.container_duration_seconds)*reset_n} containers/24h (dynamic based on cycle)'])
+            writer.writerow(['Parallelism', f'Maintains constant {reset_n}-way parallelism'])
+            writer.writerow(['GPU Utilization', f'Peak {self._get_gpu_utilization():.2f}% ({self._get_cycle_memory():.1f} / {self.config.total_gpu_memory_mb} MB)'])
             writer.writerow(['Fairness', 'All containers scheduled, no starvation'])
-            writer.writerow(['Implementation', 'effective_n = ((n-1) % 3) + 1; memory = base × multiplier^(effective_n-1)'])
+            writer.writerow(['Implementation', f'effective_n = ((n-1) % {self._get_reset_interval()}) + 1; memory = base × multiplier^(effective_n-1)'])
             writer.writerow([])
 
             # writer.writerow(['Implementation Code'])
@@ -912,7 +976,7 @@ class CSVReporter:
             writer.writerow(['Total GPU Memory', f'{self.config.total_gpu_memory_mb} MB'])
             writer.writerow(['Container Duration', f'{self.config.container_duration_seconds} seconds ({self.config.container_duration_minutes} min)'])
             writer.writerow(['Max Concurrent', f'{self.config.max_concurrent_containers}'])
-            writer.writerow(['Reset Interval', '3 containers (memory cycles)'])
+            writer.writerow(['Reset Interval', f'{self._get_reset_interval()} containers (dynamic)'])
             writer.writerow([])
 
             # Timeline header
@@ -929,7 +993,7 @@ class CSVReporter:
 
             # Generate first 3600 seconds (1 hour) with 5-second sampling intervals
             total_gpu = self.config.total_gpu_memory_mb
-            reset_interval = 3
+            reset_interval = self._get_reset_interval()
             container_duration_seconds = self.config.container_duration_seconds
 
             # Simulate with actual launch/completion logic
@@ -1010,12 +1074,15 @@ class CSVReporter:
             writer.writerow([])
 
             # Metadata
-            cycles_total = int((self.config.simulation_hours * 3600) / (self.config.container_duration_seconds + 5))  # Approximate cycle time
-            containers_expected = cycles_total * self.config.max_concurrent_containers
+            reset_n = self._get_reset_interval()
+            cycle_time = self.config.container_duration_seconds
+            total_seconds = self.config.simulation_hours * 3600
+            expected = int(total_seconds / cycle_time) * reset_n
             writer.writerow(['Launch Interval', '5 seconds (between containers in a cycle)'])
             writer.writerow(['Total Simulation', f'{self.config.simulation_hours} hours'])
             writer.writerow(['Container Duration', f'{self.config.container_duration_seconds} seconds ({self.config.container_duration_minutes} min)'])
-            writer.writerow(['Expected Containers', f'~{containers_expected}'])
+            writer.writerow(['Containers per Cycle', f'{reset_n}'])
+            writer.writerow(['Expected Containers', f'~{expected}'])
             writer.writerow([])
 
             # Header
@@ -1036,7 +1103,7 @@ class CSVReporter:
             launch_interval = 5  # seconds
 
             container_id = 1
-            reset_interval = 3
+            reset_interval = self._get_reset_interval()
             running_containers = []
 
             for slot in range(0, int(self.config.simulation_hours * 3600) + 600, launch_interval):
