@@ -956,6 +956,8 @@ class CSVReporter:
             writer.writerow(['starvation_prevention.csv', 'Policy comparison', 'Fairness analysis'])
             writer.writerow(['containers_data.csv', 'Container execution data', 'Execution metrics'])
             writer.writerow(['memory_timeline.csv', 'Memory usage over time', 'Resource tracking'])
+            writer.writerow(['execution_schedule.csv', 'Complete container scheduling with concurrency', 'Comprehensive scheduling detail'])
+            writer.writerow(['queue_analysis.csv', 'Ready queue events and statistics', 'Queue fairness tracking'])
 
         return filepath
 
@@ -1151,6 +1153,238 @@ class CSVReporter:
 
         return filepath
 
+    def generate_execution_schedule_csv(self):
+        """Generate comprehensive execution schedule showing all containers with concurrent execution details"""
+        filepath = os.path.join(self.report_subdir, "execution_schedule.csv")
+
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+
+            # Header
+            writer.writerow(['COMPREHENSIVE EXECUTION SCHEDULE'])
+            writer.writerow(['Complete container lifecycle with concurrent execution details'])
+            writer.writerow(['Generated:', datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow([])
+
+            # Configuration
+            writer.writerow(['CONFIGURATION'])
+            writer.writerow(['Base Memory:', f'{self.config.base_memory_mb} MB'])
+            writer.writerow(['Memory Multiplier:', f'{self.config.memory_multiplier}x'])
+            writer.writerow(['Total GPU Memory:', f'{self.config.total_gpu_memory_mb} MB'])
+            writer.writerow(['Container Duration:', f'{self.config.container_duration_seconds}s'])
+            writer.writerow(['Max Concurrent:', f'{self.config.max_concurrent_containers}'])
+            writer.writerow(['Reset Interval (cycle):', f'{self._get_reset_interval()}'])
+            writer.writerow([])
+
+            if not self.containers:
+                writer.writerow(['STATUS: No container data collected yet'])
+                return filepath
+
+            # Generate main execution table
+            writer.writerow(['INDIVIDUAL CONTAINER EXECUTION'])
+            writer.writerow([
+                'Container ID',
+                'Memory (MB)',
+                'Type (n/cycle)',
+                'Launch Time (s)',
+                'Completion Time (s)',
+                'Duration Actual (s)',
+                'Status',
+                'State Count',
+                'Peak Concurrent',
+                'Overlapping Containers'
+            ])
+
+            # Sort containers by launch time
+            sorted_containers = sorted(self.containers.values(), key=lambda c: c.launch_time)
+
+            for c in sorted_containers:
+                if c.completion_time is None:
+                    duration = 0
+                    is_complete = False
+                else:
+                    duration = c.completion_time - c.launch_time
+                    is_complete = True
+
+                # Find all overlapping containers
+                overlapping = []
+                for other in self.containers.values():
+                    if other.container_id == c.container_id:
+                        continue
+                    if other.completion_time is None:
+                        continue
+                    # Check if time ranges overlap
+                    if c.launch_time < other.completion_time and other.launch_time < c.completion_time:
+                        overlapping.append(other.container_id)
+
+                overlapping_str = ', '.join([f'C{cid}' for cid in sorted(overlapping)]) if overlapping else 'None'
+
+                # Get container type
+                reset_pos = ((c.container_id - 1) % self._get_reset_interval()) + 1
+                cycle = self._get_reset_interval()
+
+                status = '✓ COMPLETED' if c.success else ('✗ FAILED' if c.completion_time else 'RUNNING')
+
+                writer.writerow([
+                    c.container_id,
+                    f"{c.memory_mb:.1f}",
+                    f'{reset_pos}/{cycle}',
+                    f"{c.launch_time:.2f}",
+                    f"{c.completion_time:.2f}" if c.completion_time else 'N/A',
+                    f"{duration:.2f}" if is_complete else 'N/A',
+                    status,
+                    len(c.state_transitions),
+                    len(overlapping),
+                    overlapping_str
+                ])
+
+            # Concurrent execution analysis
+            writer.writerow([])
+            writer.writerow(['CONCURRENT EXECUTION ANALYSIS'])
+            writer.writerow([
+                'Time Point (s)',
+                'Concurrent Count',
+                'Container IDs',
+                'Total Memory (MB)',
+                'Memory %',
+                'Remaining (MB)',
+                'Event Type'
+            ])
+
+            # Build timeline of all significant events
+            events = []
+            for c in self.containers.values():
+                if c.completion_time:
+                    events.append(('START', c.launch_time, c.container_id, c.memory_mb))
+                    events.append(('END', c.completion_time, c.container_id, c.memory_mb))
+
+            # Sort events by time
+            events.sort(key=lambda e: (e[1], e[0] == 'END'))  # START before END at same time
+
+            # Track active containers at each time point
+            active_at_time = {}
+            current_active = {}
+
+            for event_type, event_time, container_id, memory in events:
+                if event_type == 'START':
+                    current_active[container_id] = memory
+                else:
+                    current_active.pop(container_id, None)
+
+                # Record state after event
+                if current_active:
+                    active_at_time[event_time] = dict(current_active)
+
+            # Write timeline entries
+            for event_time in sorted(active_at_time.keys()):
+                active_ids = sorted(active_at_time[event_time].keys())
+                active_memory = sum(active_at_time[event_time].values())
+                memory_pct = (active_memory / self.config.total_gpu_memory_mb) * 100
+                remaining = self.config.total_gpu_memory_mb - active_memory
+
+                # Determine event type
+                if len(active_at_time.get(event_time, {})) > len(active_at_time.get(event_time - 0.1, {})):
+                    event_desc = 'LAUNCH'
+                else:
+                    event_desc = 'COMPLETION'
+
+                writer.writerow([
+                    f"{event_time:.2f}",
+                    len(active_ids),
+                    ', '.join([f'C{cid}' for cid in active_ids]),
+                    f"{active_memory:.1f}",
+                    f"{memory_pct:.2f}%",
+                    f"{remaining:.1f}",
+                    event_desc
+                ])
+
+            # State transition details
+            writer.writerow([])
+            writer.writerow(['STATE TRANSITION TIMELINE'])
+            writer.writerow([
+                'Container ID',
+                'State',
+                'Timestamp (s)',
+                'Time Since Launch (s)',
+                'Description'
+            ])
+
+            state_descriptions = {
+                'CREATED': 'Registered and memory allocated',
+                'STARTING': 'Process being launched',
+                'ALLOCATING_MEMORY': 'GPU memory allocation in progress',
+                'RUNNING': 'Active execution on GPU',
+                'RELEASING_MEMORY': 'Releasing allocated resources',
+                'COMPLETED': 'Finished successfully',
+                'FAILED': 'Finished with error'
+            }
+
+            for c in sorted_containers:
+                for state, ts in c.state_transitions:
+                    time_since_launch = ts - c.launch_time
+                    writer.writerow([
+                        c.container_id,
+                        state,
+                        f"{ts:.2f}",
+                        f"{time_since_launch:.2f}",
+                        state_descriptions.get(state, 'Unknown')
+                    ])
+
+            # Summary statistics
+            writer.writerow([])
+            writer.writerow(['EXECUTION SUMMARY STATISTICS'])
+            writer.writerow(['Metric', 'Value', 'Unit'])
+
+            total_containers = len(self.containers)
+            completed = sum(1 for c in self.containers.values() if c.completion_time is not None)
+            successful = sum(1 for c in self.containers.values() if c.success)
+
+            writer.writerow(['Total Containers', total_containers, 'count'])
+            writer.writerow(['Completed', completed, 'count'])
+            writer.writerow(['Successful', successful, 'count'])
+            writer.writerow(['Success Rate', f'{(successful/completed*100):.1f}' if completed > 0 else 'N/A', '%'])
+
+            if sorted_containers:
+                first_launch = sorted_containers[0].launch_time
+                last_completion = max((c.completion_time for c in self.containers.values() if c.completion_time), default=first_launch)
+                total_execution_time = last_completion - first_launch
+
+                writer.writerow(['Total Execution Time', f'{total_execution_time:.2f}', 'seconds'])
+                writer.writerow(['Throughput', f'{completed/(total_execution_time/self.config.container_duration_seconds):.1f}' if total_execution_time > 0 else 'N/A', 'containers/cycle'])
+
+            # Memory statistics
+            total_memory_allocated = sum(c.memory_mb for c in self.containers.values())
+            avg_memory = total_memory_allocated / total_containers if total_containers > 0 else 0
+
+            writer.writerow(['Total Memory Allocated', f'{total_memory_allocated:.1f}', 'MB'])
+            writer.writerow(['Average Memory per Container', f'{avg_memory:.1f}', 'MB'])
+            writer.writerow(['Peak GPU Utilization', f'{self._get_gpu_utilization():.2f}', '%'])
+
+            # Parallelism analysis
+            writer.writerow([])
+            writer.writerow(['PARALLELISM ANALYSIS'])
+            writer.writerow(['Parallelism Level', 'Occurrences', 'Percentage', 'Duration (s)'])
+
+            parallelism_stats = {}
+            for event_time in sorted(active_at_time.keys()):
+                count = len(active_at_time[event_time])
+                if count not in parallelism_stats:
+                    parallelism_stats[count] = 0
+                parallelism_stats[count] += 1
+
+            for level in sorted(parallelism_stats.keys()):
+                occurrences = parallelism_stats[level]
+                total_points = len(active_at_time)
+                pct = (occurrences / total_points * 100) if total_points > 0 else 0
+                writer.writerow([
+                    level,
+                    occurrences,
+                    f'{pct:.1f}%',
+                    f'{occurrences * 5:.1f}'  # Assuming 5-second intervals
+                ])
+
+        return filepath
+
     def generate_queue_analysis_csv(self):
         """Generate DYNAMIC queue_analysis.csv with ready queue statistics"""
         filepath = os.path.join(self.report_subdir, "queue_analysis.csv")
@@ -1247,6 +1481,7 @@ class CSVReporter:
             'memory_timeline': self.generate_memory_timeline_csv(),
             'first_hour_timeline': self.generate_first_hour_timeline_csv(),
             'container_launch_schedule': self.generate_container_launch_schedule_csv(),
+            'execution_schedule': self.generate_execution_schedule_csv(),
             'queue_analysis': self.generate_queue_analysis_csv(),
             'summary_report': self.generate_summary_report()
         }
