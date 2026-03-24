@@ -21,6 +21,9 @@ if __name__ == "__main__":
     from container_runner import ContainerRunner, ContainerRunConfig
     from csv_reporter import CSVReporter
     from watchdog import GPUWatchdog
+    from log_setup import setup_logging, log_config_summary, log_dynamic_reset_config
+    from log_setup import log_container_launch, log_container_queued, log_container_from_queue
+    from log_setup import log_container_completed, log_system_event
     # Import config loader
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from config_loader import ConfigLoader
@@ -28,6 +31,9 @@ else:
     from .memory_manager import MemoryManager
     from .state_tracker import StateTracker, ContainerState, SystemState
     from .container_runner import ContainerRunner, ContainerRunConfig
+    from .log_setup import setup_logging, log_config_summary, log_dynamic_reset_config
+    from .log_setup import log_container_launch, log_container_queued, log_container_from_queue
+    from .log_setup import log_container_completed, log_system_event
     from .csv_reporter import CSVReporter
     from .watchdog import GPUWatchdog
     # Import config loader
@@ -502,18 +508,19 @@ class Scheduler:
 
 def main():
     """Main function - loads config from config.ini and runs scheduler"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Initialize logging to file and console
+    logger_local, log_path = setup_logging()
+    logger_local.info("Scheduler logging initialized")
 
     try:
         # Load configuration from config.ini
         config_loader = ConfigLoader()
-        config_loader.print_config()
 
         # Get scheduler config from config.ini
         cfg = config_loader.get_scheduler_config()
+
+        # Log configuration summary
+        log_config_summary(logger_local, cfg)
 
         # Create SchedulerConfig dataclass from config file
         config = SchedulerConfig(
@@ -528,6 +535,8 @@ def main():
         )
 
         logger.info("Starting scheduler with config from config.ini...")
+        logger.info(f"Log file: {log_path}")
+
         scheduler = Scheduler(config)
         scheduler.start()
 
@@ -542,6 +551,7 @@ def main():
             logger.info("Shutting down scheduler...")
             scheduler.stop()  # Now includes report generation and save_report() inside
             logger.info("Scheduler completed successfully!")
+            logger.info(f"Full logs available at: {log_path}")
 
     except FileNotFoundError as e:
         logger.error(f"Configuration error: {e}")
