@@ -1,0 +1,26 @@
+2026-03-25 00:53:53,505 - log_setup - INFO - Logging initialized. Log file: /Users/L065462/lilly/Practice/CLEAN-GPU/re-changed/GPU-tets/logs/scheduler_20260325_005353.log
+2026-03-25 00:53:53,505 - log_setup - INFO - Scheduler logging initialized
+2026-03-25 00:53:53,506 - config_loader - INFO - Loaded configuration from: config.ini
+2026-03-25 00:53:53,506 - log_setup - INFO - ================================================================================
+2026-03-25 00:53:53,506 - log_setup - INFO - CONFIGURATION SUMMARY
+2026-03-25 00:53:53,506 - log_setup - INFO - ================================================================================
+2026-03-25 00:53:53,506 - log_setup - INFO - 
+2026-03-25 00:53:53,506 - log_setup - INFO - [SCHEDULER]
+2026-03-25 00:53:53,506 - log_setup - INFO -   GPU Memory: 4096.0MB
+2026-03-25 00:53:53,506 - log_setup - INFO -   Container Duration: 600s
+2026-03-25 00:53:53,506 - log_setup - INFO -   Step Interval: 5s
+2026-03-25 00:53:53,506 - log_setup - INFO -   Max Concurrent: 3
+2026-03-25 00:53:53,506 - log_setup - INFO -   Memory Multiplier: 1.5x
+2026-03-25 00:53:53,506 - log_setup - INFO -   Base Memory: 862.0MB
+2026-03-25 00:53:53,506 - log_setup - INFO -   Simulation Duration: 24.0h
+2026-03-25 00:53:53,506 - log_setup - INFO - 
+2026-03-25 00:53:53,506 - log_setup - INFO - [REPORTS]
+2026-03-25 00:53:53,506 - log_setup - INFO -   Directory: reports
+2026-03-25 00:53:53,506 - __main__ - ERROR - Unexpected error: 'SchedulerConfig' object has no attribute 'num_containers_to_analyze'
+Traceback (most recent call last):
+  File "/Users/L065462/lilly/Practice/CLEAN-GPU/re-changed/GPU-tets/scheduler/main.py", line 523, in main
+    log_config_summary(logger_local, cfg)
+  File "/Users/L065462/lilly/Practice/CLEAN-GPU/re-changed/GPU-tets/scheduler/log_setup.py", line 78, in log_config_summary
+    logger.info(f"  Containers to Analyze: {config.num_containers_to_analyze}")
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SchedulerConfig' object has no attribute 'num_containers_to_analyze'
